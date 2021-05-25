@@ -60,7 +60,7 @@ int main(int argc , char *argv[])
 	int opt = TRUE;
 	int master_socket[2];  // IPv4 e IPv6 (si estan habilitados)
 	int master_socket_size=0;
-	int addrlen , new_socket , client_socket[MAX_SOCKETS], server_socket[MAX_SOCKETS] , max_clients = MAX_SOCKETS , activity, i , sd;
+	int addrlen , new_socket , client_socket[MAX_SOCKETS], server_socket[MAX_SOCKETS] , max_clients = MAX_SOCKETS , activity, i , sd, servSd;
 	long valread;
 	int max_sd;
 	struct sockaddr_in address;
@@ -75,7 +75,9 @@ int main(int argc , char *argv[])
 
 	// Agregamos un buffer de escritura asociado a cada socket, para no bloquear por escritura
 	struct buffer bufferWrite[MAX_SOCKETS];
+	struct buffer serverBufferWrite[MAX_SOCKETS];
 	memset(bufferWrite, 0, sizeof bufferWrite);
+    memset(serverBufferWrite,0,sizeof serverBufferWrite);
 
 	// y tambien los flags para writes
 	fd_set writefds;
@@ -180,14 +182,18 @@ int main(int argc , char *argv[])
 		{
 			// socket descriptor
 			sd = client_socket[i];
+			servSd = server_socket[i];
 
 			// if valid socket descriptor then add to read list
 			if(sd > 0)
 				FD_SET( sd , &readfds);
 
+			if(servSd > 0)
+			    FD_SET(servSd,&readfds);
+
+
 			// highest file descriptor number, need it for the select function
-			if(sd > max_sd)
-				max_sd = sd;
+			max_sd = max(max_sd,max(sd,servSd));
 		}
 
 		//wait for an activity on one of the sockets , timeout is NULL , so wait indefinitely
@@ -257,6 +263,7 @@ int main(int argc , char *argv[])
                         FD_SET(new_socket, &writefds);
 
                         buffer_init(&bufferWrite[i], N(buffer), buffer);
+                        buffer_init(&serverBufferWrite[i],N(buffer),buffer);
 
 						break;
 					}
@@ -266,32 +273,39 @@ int main(int argc , char *argv[])
 
 		//Verifico si se pudo realizar la conexion a un server o no
 		for(i = 0; i<max_clients;i++){
-		    sd = server_socket[i];
-            if (FD_ISSET(sd, &writefds)) {
-                if(getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen)<0) {
+		    servSd = server_socket[i];
+		    sd = client_socket[i];
+            if (FD_ISSET(servSd, &writefds)) {
+                if(getpeername(servSd , (struct sockaddr*)&address , (socklen_t*)&addrlen)<0) {
                     if (errno == ENOTCONN)
-                        log(INFO, "Connection to server socket %d failed %d\n", sd);
+                        log(INFO, "Connection to server socket %d failed %d\n", servSd);
 
                     //Close the socket and mark as 0 in list for reuse
-                    close( client_socket[i] );
+                    close( sd );
                     client_socket[i] = 0;
 
-                    close( server_socket[i] );
+                    close( servSd );
                     server_socket[i] = 0;
 
-                    FD_CLR(server_socket[i], &writefds);
+                    FD_CLR(servSd, &writefds);
+                    FD_CLR(sd,&writefds);
                     // Limpiamos el buffer asociado, para que no lo "herede" otra sesión
                     clear(&bufferWrite[i]);
-                    log(INFO, "Closing client socket %d\n", client_socket[i]);
+                    clear(&serverBufferWrite[i]);
+                    log(INFO, "Closing client socket %d\n", sd);
                 }
             }
 		}
 
+		//TODO: revisar este bloque de codigo
 		for(i =0; i < max_clients; i++) {
 			sd = client_socket[i];
-
-			if (FD_ISSET(server_socket[i], &writefds)) {
-				handleWrite(server_socket[i], &bufferWrite[i], &writefds);
+			servSd = server_socket[i];
+			if (FD_ISSET(servSd, &writefds)) {
+				handleWrite(servSd, &bufferWrite[i], &writefds);
+			}
+			if(FD_ISSET(sd,&writefds)){
+                handleWrite(sd,&serverBufferWrite[i],&writefds);
 			}
 		}
 
@@ -299,6 +313,7 @@ int main(int argc , char *argv[])
 		for (i = 0; i < max_clients; i++) 
 		{
 			sd = client_socket[i];
+			servSd = server_socket[i];
 
 			if (FD_ISSET( sd , &readfds)) 
 			{
@@ -313,17 +328,17 @@ int main(int argc , char *argv[])
 					close( sd );
 					client_socket[i] = 0;
 
-					close( server_socket[i] );
+					close( servSd );
 					server_socket[i] = 0;
 
-					FD_CLR(server_socket[i], &writefds);
+					FD_CLR(servSd, &writefds);
 					// Limpiamos el buffer asociado, para que no lo "herede" otra sesión
 					clear(&bufferWrite[i]);
 				}
 				else {
 					log(DEBUG, "Received %zu bytes from socket %d\n", valread, sd);
 					// activamos el socket para escritura y almacenamos en el buffer de salida
-					FD_SET(server_socket[i], &writefds);
+					FD_SET(servSd, &writefds);
 
 					// Tal vez ya habia datos en el buffer
 					// TODO: validar realloc != NULL
@@ -335,8 +350,45 @@ int main(int argc , char *argv[])
                     uint8_t *ptr = buffer_write_ptr(&bufferWrite[i], &wbytes);
                     memcpy(ptr, buffer, valread);
                     buffer_write_adv(&bufferWrite[i], valread);
-                    handleWrite(server_socket[i],&bufferWrite[i],&writefds);
+                    handleWrite(servSd,&bufferWrite[i],&writefds);
 				}
+			}
+			if(FD_ISSET(servSd,&readfds)){
+                //Check if it was for closing , and also read the incoming message
+                if ((valread = read( servSd , buffer, BUFFSIZE)) <= 0)
+                {
+                    //Somebody disconnected , get his details and print
+                    getpeername(servSd, (struct sockaddr*)&address , (socklen_t*)&addrlen);
+                    log(INFO, "Host disconnected , ip %s , port %d \n" , inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+
+                    //Close the socket and mark as 0 in list for reuse
+                    close( sd );
+                    client_socket[i] = 0;
+
+                    close( servSd );
+                    server_socket[i] = 0;
+
+                    FD_CLR(sd, &writefds);
+                    // Limpiamos el buffer asociado, para que no lo "herede" otra sesión
+                    clear(&serverBufferWrite[i]);
+                }
+                else {
+                    log(DEBUG, "Received %zu bytes from socket %d\n", valread, servSd);
+                    // activamos el socket para escritura y almacenamos en el buffer de salida
+                    FD_SET(sd, &writefds);
+
+                    // Tal vez ya habia datos en el buffer
+                    // TODO: validar realloc != NULL
+                    // bufferWrite[i].data = realloc(bufferWrite[i].data, *bufferWrite[i].limit + valread);
+                    // memcpy(bufferWrite[i].data + *bufferWrite[i].limit, buffer, valread);
+                    // *bufferWrite[i].limit += valread;
+
+                    size_t wbytes = 0/*, rbytes = 0*/;
+                    uint8_t *ptr = buffer_write_ptr(&serverBufferWrite[i], &wbytes);
+                    memcpy(ptr, buffer, valread);
+                    buffer_write_adv(&serverBufferWrite[i], valread);
+                    handleWrite(sd,&serverBufferWrite[i],&writefds);
+                }
 			}
 		}
 	}
