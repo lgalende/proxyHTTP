@@ -21,7 +21,7 @@
 #define FALSE  0
 #define PORT 8888
 #define MAX_SOCKETS 30
-#define BUFFSIZE 1024
+#define BUFFSIZE 20
 #define PORT_UDP 8888
 #define MAX_PENDING_CONNECTIONS   3    // un valor bajo, para realizar pruebas
 #define MAX_ADDR_BUFFER 128
@@ -163,7 +163,7 @@ int main(int argc , char *argv[])
 
 	// Limpiamos el conjunto de escritura
 	FD_ZERO(&writefds);
-	while(TRUE) 
+	while(TRUE)
 	{
 		//clear the socket set
 		FD_ZERO(&readfds);
@@ -237,6 +237,7 @@ int main(int argc , char *argv[])
 						log(DEBUG, "Adding to list of server sockets as %d - socket %d\n" , i, new_socket);
 
                         struct sockaddr_in server_address;
+                        memset(&server_address,0,sizeof server_address);
                         server_address.sin_family = AF_INET;
                         server_address.sin_addr.s_addr = inet_addr("127.0.0.1");
                         server_address.sin_port = htons(9999);
@@ -261,6 +262,29 @@ int main(int argc , char *argv[])
 					}
 				}
 			}
+		}
+
+		//Verifico si se pudo realizar la conexion a un server o no
+		for(i = 0; i<max_clients;i++){
+		    sd = server_socket[i];
+            if (FD_ISSET(sd, &writefds)) {
+                if(getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen)<0) {
+                    if (errno == ENOTCONN)
+                        log(INFO, "Connection to server socket %d failed %d\n", sd);
+
+                    //Close the socket and mark as 0 in list for reuse
+                    close( client_socket[i] );
+                    client_socket[i] = 0;
+
+                    close( server_socket[i] );
+                    server_socket[i] = 0;
+
+                    FD_CLR(server_socket[i], &writefds);
+                    // Limpiamos el buffer asociado, para que no lo "herede" otra sesión
+                    clear(&bufferWrite[i]);
+                    log(INFO, "Closing client socket %d\n", client_socket[i]);
+                }
+            }
 		}
 
 		for(i =0; i < max_clients; i++) {
@@ -311,6 +335,7 @@ int main(int argc , char *argv[])
                     uint8_t *ptr = buffer_write_ptr(&bufferWrite[i], &wbytes);
                     memcpy(ptr, buffer, valread);
                     buffer_write_adv(&bufferWrite[i], valread);
+                    handleWrite(server_socket[i],&bufferWrite[i],&writefds);
 				}
 			}
 		}
@@ -354,7 +379,10 @@ void handleWrite(int socket, struct buffer * buffer, fd_set * writefds) {
 				buffer_read_adv(buffer, bytesSent);
 			}
 		}
-	}
+	}else {
+        log(DEBUG, "Nothing to send to socket %d", socket);
+        FD_CLR(socket, writefds);
+    }
 }
 
 int udpSocket(int port) {

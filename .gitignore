@@ -1,3 +1,9 @@
+#Project Executables
+tcpProxy
+tcpEchoClientTest
+tcpEchoAddrinfo
+udpTest
+
 # Prerequisites
 *.d
 
@@ -50,3 +56,6 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Covers JetBrains IDEs:
+.idea/
