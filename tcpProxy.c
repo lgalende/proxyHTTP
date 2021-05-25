@@ -12,6 +12,8 @@
 #include "logger.h"
 #include "tcpServerUtil.h"
 #include "buffer.h"
+#include "addressUtility.h"
+
 
 #define max(n1,n2)     ((n1)>(n2) ? (n1) : (n2))
 
@@ -19,9 +21,10 @@
 #define FALSE  0
 #define PORT 8888
 #define MAX_SOCKETS 30
-#define BUFFSIZE 25
+#define BUFFSIZE 1024
 #define PORT_UDP 8888
 #define MAX_PENDING_CONNECTIONS   3    // un valor bajo, para realizar pruebas
+#define MAX_ADDR_BUFFER 128
 
 #define N(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -79,6 +82,9 @@ int main(int argc , char *argv[])
 
 	//initialise all client_socket[] to 0 so not checked
 	memset(client_socket, 0, sizeof(client_socket));
+
+		//initialise all server_socket[] to 0 so not checked
+	memset(server_socket, 0, sizeof(server_socket));
 
 	// TODO adaptar setupTCPServerSocket para que cree socket para IPv4 e IPv6 y ademas soporte opciones
 	// socket para IPv4 y para IPv6 (si estan disponibles)
@@ -218,34 +224,38 @@ int main(int argc , char *argv[])
 					if( client_socket[i] == 0 /*&& server_socket[i] == 0*/)
 					{
 						client_socket[i] = new_socket;
-						log(DEBUG, "Adding to list of sockets as %d\n" , i);
+						log(DEBUG, "Adding to list of client sockets as %d - socket %d\n" , i, new_socket);
 
-                        // new_socket = socket(AF_INET , SOCK_STREAM | SOCK_NONBLOCK , 0);
-                        // if (new_socket < 0)
-                        // {
-                        //     client_socket[i] = 0;
-                        //     log(ERROR, "Server socket error on master socket %d", mSock);
-                        //     break; //TODO: chequear
-                        // }
-                        // server_socket[i] = new_socket;
+                        new_socket = socket(AF_INET , SOCK_STREAM | SOCK_NONBLOCK, 0);
+                        if (new_socket < 0)
+                        {
+                            client_socket[i] = 0;
+                            log(ERROR, "Server socket error on master socket %d\nClient socket %d deleted\n", mSock, i);
+                            break; //TODO: chequear
+                        }
+                        server_socket[i] = new_socket;
+						log(DEBUG, "Adding to list of server sockets as %d - socket %d\n" , i, new_socket);
 
-                        // struct sockaddr_in server_address;
-                        // server_address.sin_family = AF_INET;
-                        // server_address.sin_addr.s_addr = inet_addr("127.0.0.1");
-                        // server_address.sin_port = htons(9091);
-                        // int len = sizeof(server_address);
+                        struct sockaddr_in server_address;
+                        server_address.sin_family = AF_INET;
+                        server_address.sin_addr.s_addr = inet_addr("127.0.0.1");
+                        server_address.sin_port = htons(9999);
+                        int len = sizeof(server_address);
+
+						char addrBuffer[MAX_ADDR_BUFFER];
+						printSocketAddress((struct sockaddr *) &server_address, addrBuffer);
+						log(INFO, "Handling server %s", addrBuffer);
                         
-                        // if( connect(new_socket, (struct sockaddr *) &server_address, len) < 0 && errno != EINPROGRESS){
-                        //     client_socket[i] = 0;
-                        //     server_socket[i] = 0;
-                        //     log(ERROR, "Server connect error on master socket %d", mSock);
-                        //     break; //TODO: chequear
-                        // }
+                        if( connect(new_socket, (struct sockaddr *) &server_address, len) < 0 && errno != EINPROGRESS) {
+                            client_socket[i] = 0;
+                            server_socket[i] = 0;
+                            log(ERROR, "Server connect error on master socket %d\nClient and server sockets %d deleted\n", mSock, i);
+                            break; //TODO: chequear
+                        }
 
-                        // FD_SET(new_socket, &writefds);
+                        FD_SET(new_socket, &writefds);
 
                         buffer_init(&bufferWrite[i], N(buffer), buffer);
-
 
 						break;
 					}
@@ -256,8 +266,8 @@ int main(int argc , char *argv[])
 		for(i =0; i < max_clients; i++) {
 			sd = client_socket[i];
 
-			if (FD_ISSET(sd, &writefds)) {
-				handleWrite(sd, &bufferWrite[i], &writefds);
+			if (FD_ISSET(server_socket[i], &writefds)) {
+				handleWrite(server_socket[i], &bufferWrite[i], &writefds);
 			}
 		}
 
@@ -279,14 +289,17 @@ int main(int argc , char *argv[])
 					close( sd );
 					client_socket[i] = 0;
 
-					FD_CLR(sd, &writefds);
+					close( server_socket[i] );
+					server_socket[i] = 0;
+
+					FD_CLR(server_socket[i], &writefds);
 					// Limpiamos el buffer asociado, para que no lo "herede" otra sesión
 					clear(&bufferWrite[i]);
 				}
 				else {
 					log(DEBUG, "Received %zu bytes from socket %d\n", valread, sd);
 					// activamos el socket para escritura y almacenamos en el buffer de salida
-					FD_SET(sd, &writefds);
+					FD_SET(server_socket[i], &writefds);
 
 					// Tal vez ya habia datos en el buffer
 					// TODO: validar realloc != NULL
